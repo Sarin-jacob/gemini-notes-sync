@@ -1,0 +1,11 @@
+# secrets
+key.json
+*.key.json
+service-account*.json
+
+# local spike output (contains real meeting notes)
+spike-out/
+
+# runtime data
+data/
+.env
