@@ -1,0 +1,41 @@
+# gemini-notes-sync configuration. ${VAR} is replaced from the environment;
+# a .env file next to this file is loaded first.
+
+google:
+  # Service account JSON key. Share your Meet folders with its e-mail as Viewer.
+  credentials_file: key.json
+  # Folder IDs to sync. Empty: every folder shared with the service account,
+  # walked recursively (covers both "Meet Recordings" and "Google Meet").
+  folder_ids: []
+  # Which Google Docs count as notes (regex on the file name).
+  notes_name_pattern: "(?i)notes by gemini"
+
+outline:
+  base_url: ${OUTLINE_URL}
+  api_key: ${OUTLINE_API_KEY}
+  collection: ${OUTLINE_COLLECTION}   # name or ID
+
+sync:
+  interval: 10m
+  lookback: 0s            # only notes created within this window; 0s = all
+  conflict_policy: skip   # skip: never overwrite documents edited in Outline | overwrite
+  state_path: data/state.db
+  timezone: Asia/Kolkata  # IANA zone the meeting times in file names are in
+  health_addr: ":8080"    # GET /healthz in "run" mode; empty disables
+
+layout:
+  # Go templates. Fields: .Title .RawTitle .Untitled .Date .Attendees .MeetCode
+  #   .EventID .SeriesID .DriveID .DriveURL .Folder
+  # Functions: date, lower, upper, trim, trunc, default, replace, regexReplace, join
+  # "/" in path separates nested container documents; each gets an auto index.
+  path: '{{ .Date | date "2006" }}/{{ .Date | date "01 January" }}'
+  title: '{{ .Date | date "2006-01-02" }} — {{ if .Untitled }}Meeting at {{ .Date | date "15:04" }}{{ else }}{{ .Title }}{{ end }}'
+  # Nested tab documents additionally get .Tab and .MainTitle.
+  child_title: '{{ .Tab }} — {{ .MainTitle }}'
+
+content:
+  main: quick_notes                    # tab that becomes the meeting document
+  children: [full_notes, transcript]   # tabs nested under it, in this order
+  # Extra regexes; matching lines are removed (Gemini's surveys and
+  # disclaimers are removed by default).
+  drop_lines: []

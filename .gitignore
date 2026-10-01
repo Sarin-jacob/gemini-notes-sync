@@ -9,3 +9,6 @@ spike-out/
 # runtime data
 data/
 .env
+
+# local configuration
+config.yaml

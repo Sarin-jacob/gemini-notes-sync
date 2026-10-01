@@ -1,0 +1,13 @@
+services:
+  sync:
+    build: .
+    image: gemini-notes-sync
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./key.json:/app/key.json:ro
+      - ./data:/app/data
+    # The image runs as uid 65532; on Linux make ./data writable for it
+    # (sudo chown 65532 data) or set user: to your own uid:gid.
+    # user: "1000:1000"

@@ -1,0 +1,9 @@
+.git
+.env
+key.json
+*.key.json
+service-account*.json
+config.yaml
+data/
+spike-out/
+docs/
