@@ -24,6 +24,11 @@ import (
 
 const roleMain = "main"
 
+// renderVersion is bumped whenever the generated Markdown changes, so notes
+// synced by an older version are rewritten even if their Google Doc is unchanged.
+// 2: work around Outline checklist import bugs (lost "Details" section).
+const renderVersion = 2
+
 type Syncer struct {
 	cfg   *config.Config
 	drive *gdrive.Client
@@ -36,6 +41,17 @@ type Syncer struct {
 	log   *slog.Logger
 
 	collection outline.Collection
+	renderKey  string
+}
+
+// renderKeyFor fingerprints everything that shapes the generated documents: the
+// renderer version and the output settings. When it changes, every note is
+// rewritten on the next pass even if its Google Doc is unchanged.
+func renderKeyFor(cfg *config.Config) string {
+	sum := sha256.Sum256(fmt.Appendf(nil, "v%d\x00%s\x00%s\x00%s\x00%s\x00%q\x00%q\x00%s",
+		renderVersion, cfg.Layout.Path, cfg.Layout.Title, cfg.Layout.ChildTitle,
+		cfg.Content.Main, cfg.Content.Children, cfg.Content.DropLines, cfg.Sync.Timezone))
+	return hex.EncodeToString(sum[:8])
 }
 
 type Result struct {
@@ -52,7 +68,7 @@ func New(ctx context.Context, cfg *config.Config, drv *gdrive.Client, ol *outlin
 		return nil, err
 	}
 	s := &Syncer{cfg: cfg, drive: drv, ol: ol, st: st, tpl: tpl, loc: loc, log: log,
-		name: regexp.MustCompile(cfg.Google.NotesNamePattern)}
+		name: regexp.MustCompile(cfg.Google.NotesNamePattern), renderKey: renderKeyFor(cfg)}
 	for _, p := range cfg.Content.DropLines {
 		s.drop = append(s.drop, regexp.MustCompile(p))
 	}
@@ -202,9 +218,9 @@ func (s *Syncer) Prepare(ctx context.Context, f gdrive.File) (*Plan, error) {
 
 func (s *Syncer) syncNote(ctx context.Context, f gdrive.File, tree *[]*outline.Node, touched map[string]bool, log *slog.Logger) (outcome, error) {
 	modified := f.Modified.UTC().Format(time.RFC3339Nano)
-	if prev, ok, err := s.st.NoteModified(f.ID); err != nil {
+	if prev, key, ok, err := s.st.NoteState(f.ID); err != nil {
 		return 0, err
-	} else if ok && prev == modified {
+	} else if ok && prev == modified && key == s.renderKey {
 		return unchanged, nil
 	}
 
@@ -287,7 +303,7 @@ func (s *Syncer) syncNote(ctx context.Context, f gdrive.File, tree *[]*outline.N
 			return 0, err
 		}
 	}
-	if err := s.st.MarkSynced(f.ID, modified, p.Title); err != nil {
+	if err := s.st.MarkSynced(f.ID, modified, p.Title, s.renderKey, p.Meeting.Date); err != nil {
 		return 0, err
 	}
 	log.Info("synced", "title", p.Title, "url", s.cfg.Outline.BaseURL+refs[roleMain].URL)

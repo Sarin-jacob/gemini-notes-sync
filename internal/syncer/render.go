@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sarin/gemini-notes-sync/internal/gemini"
 	"github.com/sarin/gemini-notes-sync/internal/outline"
@@ -64,7 +65,41 @@ func (s *Syncer) render(p *Plan, role string, refs map[string]store.DocRef, imag
 		header = append(header, fmt.Sprintf("**Meeting:** [%s](%s) · [Google Doc](%s)", p.Title, refs[roleMain].URL, p.File.Link))
 	}
 	// Separate lines with hard breaks so the header renders as one compact block.
-	return strings.Join(header, "  \n") + "\n\n---\n\n" + body + "\n"
+	return strings.Join(header, "  \n") + "\n\n---\n\n" + outlineSafe(body) + "\n"
+}
+
+var (
+	checkItemRe     = regexp.MustCompile(`^[-*+] (\[[ xX]\] .*)$`)
+	escapedAssignee = regexp.MustCompile(`^(\[[ xX]\] )\\\[([^\]]*?)\\\]`)
+)
+
+// outlineSafe works around two bugs in Outline's Markdown import (seen in 1.10.1):
+//   - a checklist with two or more items that follows any bullet list turns that
+//     earlier list into a checklist and drops the list after it; one-item
+//     checklists are fine, so consecutive items get alternating bullet markers,
+//     which makes each its own list (they still render as one checklist);
+//   - an escaped "\[" at the start of a checklist item becomes "undefined[".
+func outlineSafe(body string) string {
+	lines := strings.Split(body, "\n")
+	out := make([]string, 0, len(lines))
+	markers := [2]string{"- ", "* "}
+	n := 0 // position within the current run of checklist items
+	for i := 0; i < len(lines); i++ {
+		m := checkItemRe.FindStringSubmatch(lines[i])
+		if m == nil {
+			// A blank line between two checklist items does not end the run.
+			if strings.TrimSpace(lines[i]) == "" && n > 0 && i+1 < len(lines) && checkItemRe.MatchString(lines[i+1]) {
+				continue
+			}
+			n = 0
+			out = append(out, lines[i])
+			continue
+		}
+		item := escapedAssignee.ReplaceAllString(m[1], "${1}[$2]")
+		out = append(out, markers[n%2]+item)
+		n++
+	}
+	return strings.Join(out, "\n")
 }
 
 const indexHeading = "## Index"
@@ -86,13 +121,17 @@ func (s *Syncer) rebuildIndexes(ctx context.Context, ids map[string]bool) error 
 		}
 	}
 	walk(tree)
+	times, err := s.st.MeetingTimes()
+	if err != nil {
+		return err
+	}
 
 	for id := range ids {
 		node, ok := nodes[id]
 		if !ok {
 			continue
 		}
-		index := buildIndex(node.Children)
+		index := buildIndex(node.Children, times)
 		cur, err := s.ol.Info(ctx, id)
 		if err != nil {
 			return err
@@ -120,18 +159,34 @@ func (s *Syncer) rebuildIndexes(ctx context.Context, ids map[string]bool) error 
 	return nil
 }
 
-// buildIndex lists children newest first. Titles start with dates or numbered
-// months by default, so descending title order is reverse-chronological.
-func buildIndex(children []*outline.Node) string {
+// buildIndex lists children newest first. Meeting documents are ordered by
+// meeting time and prefixed with their date; other children (e.g. month
+// containers like "09 September") follow in descending title order.
+func buildIndex(children []*outline.Node, times map[string]time.Time) string {
 	sorted := append([]*outline.Node(nil), children...)
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Title > sorted[j].Title })
+	sort.SliceStable(sorted, func(i, j int) bool {
+		ti, iok := times[sorted[i].ID]
+		tj, jok := times[sorted[j].ID]
+		switch {
+		case iok && jok:
+			return ti.After(tj)
+		case iok != jok:
+			return iok
+		default:
+			return sorted[i].Title > sorted[j].Title
+		}
+	})
 	var sb strings.Builder
 	sb.WriteString(indexHeading + "\n\n")
 	if len(sorted) == 0 {
 		sb.WriteString("_Nothing here yet._\n")
 	}
 	for _, n := range sorted {
-		fmt.Fprintf(&sb, "- [%s](%s)\n", escapeLinkText(n.Title), n.URL)
+		date := ""
+		if t, ok := times[n.ID]; ok {
+			date = t.Format("Mon 2 Jan 2006") + " · "
+		}
+		fmt.Fprintf(&sb, "- %s[%s](%s)\n", date, escapeLinkText(n.Title), n.URL)
 	}
 	return sb.String()
 }

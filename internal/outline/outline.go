@@ -245,3 +245,8 @@ func Truncate(s string) string {
 	r := []rune(s)
 	return strings.TrimSpace(string(r[:MaxTitle-1])) + "…"
 }
+
+// Delete moves a document (and its children) to Outline's trash.
+func (c *Client) Delete(ctx context.Context, id string) error {
+	return c.call(ctx, "documents.delete", map[string]any{"id": id}, nil)
+}

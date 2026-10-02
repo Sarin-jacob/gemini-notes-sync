@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -62,26 +63,58 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
+	// Columns added after the first release; the error is ignored when one exists.
+	for _, col := range []string{
+		`render_key TEXT NOT NULL DEFAULT ''`,   // fingerprint of renderer + output settings
+		`meeting_time TEXT NOT NULL DEFAULT ''`, // RFC 3339, for ordering indexes
+	} {
+		if _, err := db.Exec(`ALTER TABLE notes ADD COLUMN ` + col); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			db.Close()
+			return nil, fmt.Errorf("migrate: %w", err)
+		}
+	}
 	return &Store{db: db}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
 
-// NoteModified returns the Drive modifiedTime recorded at the last successful sync.
-func (s *Store) NoteModified(driveID string) (string, bool, error) {
-	var m string
-	err := s.db.QueryRow(`SELECT drive_modified FROM notes WHERE drive_id = ?`, driveID).Scan(&m)
+// NoteState returns the Drive modifiedTime and render key recorded at the last
+// successful sync of a note.
+func (s *Store) NoteState(driveID string) (modified, renderKey string, ok bool, err error) {
+	err = s.db.QueryRow(`SELECT drive_modified, render_key FROM notes WHERE drive_id = ?`, driveID).Scan(&modified, &renderKey)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+		return "", "", false, nil
 	}
-	return m, err == nil, err
+	return modified, renderKey, err == nil, err
 }
 
-func (s *Store) MarkSynced(driveID, modified, title string) error {
-	_, err := s.db.Exec(`INSERT INTO notes (drive_id, drive_modified, title, synced_at) VALUES (?, ?, ?, ?)
-		ON CONFLICT (drive_id) DO UPDATE SET drive_modified = excluded.drive_modified, title = excluded.title, synced_at = excluded.synced_at`,
-		driveID, modified, title, time.Now().UTC().Format(time.RFC3339))
+func (s *Store) MarkSynced(driveID, modified, title, renderKey string, meeting time.Time) error {
+	_, err := s.db.Exec(`INSERT INTO notes (drive_id, drive_modified, title, synced_at, render_key, meeting_time) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT (drive_id) DO UPDATE SET drive_modified = excluded.drive_modified, title = excluded.title,
+			synced_at = excluded.synced_at, render_key = excluded.render_key, meeting_time = excluded.meeting_time`,
+		driveID, modified, title, time.Now().UTC().Format(time.RFC3339), renderKey, meeting.Format(time.RFC3339))
 	return err
+}
+
+// MeetingTimes maps the Outline ID of each meeting document to the meeting's start.
+func (s *Store) MeetingTimes() (map[string]time.Time, error) {
+	rows, err := s.db.Query(`SELECT d.outline_id, n.meeting_time FROM docs d JOIN notes n USING (drive_id)
+		WHERE d.role = 'main' AND n.meeting_time != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var id, ts string
+		if err := rows.Scan(&id, &ts); err != nil {
+			return nil, err
+		}
+		if t, err := time.Parse(time.RFC3339, ts); err == nil {
+			out[id] = t
+		}
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) Docs(driveID string) (map[string]DocRef, error) {
