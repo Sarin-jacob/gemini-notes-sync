@@ -1,6 +1,7 @@
 # gemini-notes-sync
 
-Copies Google Meet **"Notes by Gemini"** documents from Google Drive into an
+Copies Google Meet **"Notes by Gemini"** documents, and **Zoom AI Companion**
+summaries you drop into a Drive folder, into an
 [Outline](https://www.getoutline.com) collection, cleaned up and organised:
 
 ```
@@ -71,6 +72,24 @@ Or without Docker:
 ```bash
 go run ./cmd/gemini-notes-sync once
 ```
+
+### 5. Zoom summaries (optional)
+
+Zoom keeps AI Companion summaries in Zoom (and deletes them after 90 days by
+default); it does not save them to Drive. To sync them:
+
+1. Create a Drive folder, e.g. **Zoom Notes**, and share it with the service
+   account as **Viewer**.
+2. Set `zoom.folders: ["Zoom Notes"]` in `config.yaml`.
+3. After a meeting, open the summary in Zoom Docs → **…** → **Export** → **Word**,
+   and upload the file to that folder (`.md`, `.txt` and Google Docs work too).
+
+Zoom notes land in the same tree as Gemini notes, marked "Source: Zoom". The
+title and date are read from the summary ("Meeting summary for …", or the first
+heading), falling back to the file name and upload time. A "Transcript" section,
+if present, becomes a child document. Uploading a summary again updates the
+existing documents instead of creating new ones. If your Zoom writes dates
+day-first, set `zoom.date_order: dmy`.
 
 ## Commands
 

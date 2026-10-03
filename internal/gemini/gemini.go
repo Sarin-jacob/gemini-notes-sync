@@ -10,6 +10,9 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/sarin/gemini-notes-sync/internal/mdutil"
+	"github.com/sarin/gemini-notes-sync/internal/note"
 )
 
 // Tab keys as used in configuration.
@@ -19,36 +22,11 @@ const (
 	Transcript = "transcript"
 )
 
-type Tab struct {
-	Key  string // e.g. "full_notes"
-	Name string // e.g. "Full notes"
-	Body string // cleaned Markdown; images remain as ![][imageN] references
-}
-
-// Image is an inline image definition from the export (downscaled; used as fallback).
-type Image struct {
-	MIME string
-	Data []byte
-}
-
-type Doc struct {
-	Tabs          []Tab
-	Images        map[string]Image // "image1" -> data
-	Attendees     []string
-	CalendarURL   string
-	EventID       string // Calendar event ID (instance), from the event link
-	SeriesID      string // Calendar event ID without the recurrence suffix
-	TranscriptURL string // link to the transcript tab in Google Docs
-}
-
-func (d *Doc) Tab(key string) (Tab, bool) {
-	for _, t := range d.Tabs {
-		if t.Key == key {
-			return t, true
-		}
-	}
-	return Tab{}, false
-}
+type (
+	Tab   = note.Tab
+	Image = note.Image // inline image from the export (downscaled; used as fallback)
+	Doc   = note.Doc
+)
 
 // DefaultDropLines removes Gemini's survey prompts and disclaimers.
 var DefaultDropLines = []string{
@@ -60,18 +38,17 @@ var DefaultDropLines = []string{
 }
 
 var (
-	nameRe      = regexp.MustCompile(`^(.*?)\s*-?\s*(\d{4}/\d{2}/\d{2} \d{2}:\d{2})(?:\s+([A-Z][A-Za-z+\-0-9]{1,6}))?\s*-\s*Notes by Gemini\s*$`)
-	imageDefRe  = regexp.MustCompile(`(?m)^\[(image\d+)\]:\s*<data:(image/[a-z+]+);base64,([A-Za-z0-9+/=]+)>\s*$`)
-	headingRe   = regexp.MustCompile(`^(#{1,6})(?:\s+(.*?))?\s*$`)
-	anchorRe    = regexp.MustCompile(`\s*\{#[^}]*\}\s*$`)
-	boldWrapRe  = regexp.MustCompile(`^\*\*(.*?)\*\*$`)
-	mailtoRe    = regexp.MustCompile(`\[([^\]]+)\]\(mailto:[^)]*\)`)
-	dateLineRe  = regexp.MustCompile(`^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2}, \d{4}\s*$`)
-	calendarRe  = regexp.MustCompile(`https://calendar\.google\.com/calendar/event\?eid=([A-Za-z0-9_\-]+)`)
-	docLinkRe   = regexp.MustCompile(`\((https://docs\.google\.com/document/[^)\s]+)\)`)
-	redirectRe  = regexp.MustCompile(`https?://(?:www\.)?google\.com/url\?q=([^&)\s]+)[^)\s]*`)
-	blankRunsRe = regexp.MustCompile(`\n{3,}`)
-	speakerRe   = regexp.MustCompile(`(?m)^\*\*([^*:\n]{1,60}):\*\*`)
+	nameRe     = regexp.MustCompile(`^(.*?)\s*-?\s*(\d{4}/\d{2}/\d{2} \d{2}:\d{2})(?:\s+([A-Z][A-Za-z+\-0-9]{1,6}))?\s*-\s*Notes by Gemini\s*$`)
+	imageDefRe = regexp.MustCompile(`(?m)^\[(image\d+)\]:\s*<data:(image/[a-z+]+);base64,([A-Za-z0-9+/=]+)>\s*$`)
+	headingRe  = regexp.MustCompile(`^(#{1,6})(?:\s+(.*?))?\s*$`)
+	anchorRe   = regexp.MustCompile(`\s*\{#[^}]*\}\s*$`)
+	boldWrapRe = regexp.MustCompile(`^\*\*(.*?)\*\*$`)
+	mailtoRe   = regexp.MustCompile(`\[([^\]]+)\]\(mailto:[^)]*\)`)
+	dateLineRe = regexp.MustCompile(`^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2}, \d{4}\s*$`)
+	calendarRe = regexp.MustCompile(`https://calendar\.google\.com/calendar/event\?eid=([A-Za-z0-9_\-]+)`)
+	docLinkRe  = regexp.MustCompile(`\((https://docs\.google\.com/document/[^)\s]+)\)`)
+	redirectRe = regexp.MustCompile(`https?://(?:www\.)?google\.com/url\?q=([^&)\s]+)[^)\s]*`)
+	speakerRe  = regexp.MustCompile(`(?m)^\*\*([^*:\n]{1,60}):\*\*`)
 )
 
 // ParseName extracts the meeting title and start time from a Drive file name
@@ -110,7 +87,7 @@ func Parse(markdown string, extraDrop []*regexp.Regexp) *Doc {
 	drop = append(drop, extraDrop...)
 
 	for i, raw := range splitTabs(markdown) {
-		body := d.cleanTab(raw.lines, drop)
+		body := cleanTab(d, raw.lines, drop)
 		if i == 0 && raw.preamble && body == "" {
 			continue // only boilerplate before the first tab heading
 		}
@@ -166,7 +143,7 @@ func tabKey(name string) string {
 	return strings.ReplaceAll(strings.ToLower(name), " ", "_")
 }
 
-func (d *Doc) cleanTab(lines []string, drop []*regexp.Regexp) string {
+func cleanTab(d *Doc, lines []string, drop []*regexp.Regexp) string {
 	var out []string
 	titleDropped := false
 	prevOrig, prevNew := 0, 0 // previous heading level, before and after re-leveling
@@ -184,10 +161,10 @@ lines:
 
 		switch {
 		case strings.HasPrefix(trimmed, "Invited "):
-			d.addAttendees(trimmed)
+			addAttendees(d, trimmed)
 			continue
 		case strings.HasPrefix(trimmed, "Attachments "):
-			d.setCalendar(trimmed)
+			setCalendar(d, trimmed)
 			continue
 		case strings.HasPrefix(trimmed, "Meeting records "):
 			if m := docLinkRe.FindStringSubmatch(trimmed); m != nil && d.TranscriptURL == "" {
@@ -198,7 +175,7 @@ lines:
 			continue
 		case trimmed != "" && strings.TrimSpace(mailtoRe.ReplaceAllString(trimmed, "")) == "":
 			// A line made only of attendee mailto links (Quick notes header).
-			d.addAttendees(trimmed)
+			addAttendees(d, trimmed)
 			continue
 		}
 
@@ -248,29 +225,8 @@ lines:
 		out[h.idx] = strings.Repeat("#", level) + " " + out[h.idx]
 	}
 
-	body := strings.Join(trimBreaks(out), "\n")
-	body = blankRunsRe.ReplaceAllString(body, "\n\n")
-	return strings.TrimSpace(body)
-}
-
-var blockStartRe = regexp.MustCompile(`^\s*([*+-] |\d+[.)] |#|>|---)`)
-
-// trimBreaks drops hard line breaks that don't join two lines of one paragraph;
-// Gemini ends most bullets with one.
-func trimBreaks(lines []string) []string {
-	for i, l := range lines {
-		if !strings.HasSuffix(l, "  ") {
-			continue
-		}
-		next := ""
-		if i+1 < len(lines) {
-			next = lines[i+1]
-		}
-		if strings.TrimSpace(next) == "" || blockStartRe.MatchString(next) {
-			lines[i] = strings.TrimRight(l, " ")
-		}
-	}
-	return lines
+	// Gemini ends most bullets with a hard line break.
+	return mdutil.Tidy(strings.Join(mdutil.TrimBreaks(out), "\n"))
 }
 
 // trailingBreak preserves Markdown hard line breaks (two trailing spaces).
@@ -281,7 +237,7 @@ func trailingBreak(line string) string {
 	return ""
 }
 
-func (d *Doc) addAttendees(line string) {
+func addAttendees(d *Doc, line string) {
 	seen := map[string]bool{}
 	for _, a := range d.Attendees {
 		seen[a] = true
@@ -294,7 +250,7 @@ func (d *Doc) addAttendees(line string) {
 	}
 }
 
-func (d *Doc) setCalendar(line string) {
+func setCalendar(d *Doc, line string) {
 	m := calendarRe.FindStringSubmatch(line)
 	if m == nil || d.CalendarURL != "" {
 		return

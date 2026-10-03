@@ -138,13 +138,13 @@ func dryRun(ctx context.Context, s *syncer.Syncer) error {
 			fmt.Printf("\n✗ %s: %v\n", f.Name, err)
 			continue
 		}
-		fmt.Printf("\n%s\n  → %s / %s\n", f.Name, strings.Join(p.Path, " / "), p.Title)
+		fmt.Printf("\n[%s] %s\n  → %s / %s\n", f.Source, f.Name, strings.Join(p.Path, " / "), p.Title)
 		for _, key := range p.Order {
 			fmt.Printf("      └ %s\n", p.Children[key])
 		}
 		images := fmt.Sprint(p.Images)
-		if p.Images > 0 {
-			switch n, err := s.FullResImages(ctx, f); {
+		if p.Images > 0 && f.MimeType == gdrive.DocMime {
+			switch n, err := s.FullResImages(ctx, f.File); {
 			case err != nil:
 				images += fmt.Sprintf(" (full-res unavailable: %v)", err)
 			case n == p.Images:
@@ -153,7 +153,7 @@ func dryRun(ctx context.Context, s *syncer.Syncer) error {
 				images += fmt.Sprintf(" (full-res count %d ≠ export; export copies will be used)", n)
 			}
 		}
-		fmt.Printf("  main tab: %s · images: %s · attendees: %d\n", p.Main, images, len(p.Meeting.Attendees))
+		fmt.Printf("  main section: %s · images: %s · attendees: %d\n", p.Main, images, len(p.Meeting.Attendees))
 	}
 	return nil
 }
@@ -184,6 +184,21 @@ func check(ctx context.Context, cfg *config.Config, drv *gdrive.Client, ol *outl
 		re := regexp.MustCompile(cfg.Google.NotesNamePattern) // validated by config.Load
 		files, err := drv.Notes(ctx, roots, re)
 		report("gemini notes", err, fmt.Sprintf("%d found", len(files)))
+	}
+	if len(cfg.Zoom.Folders) == 0 {
+		fmt.Printf("- %-22s %s\n", "zoom folder", "not configured (zoom.folders)")
+	} else {
+		zroots, err := drv.ResolveFolders(ctx, cfg.Zoom.Folders)
+		if err != nil {
+			report("zoom folder", err, "")
+		} else {
+			var zn []string
+			for _, n := range zroots {
+				zn = append(zn, n)
+			}
+			files, err := drv.Walk(ctx, zroots, syncer.IsZoomFile)
+			report("zoom folder", err, fmt.Sprintf("%s · %d file(s)", strings.Join(zn, ", "), len(files)))
+		}
 	}
 
 	user, team, err := ol.AuthInfo(ctx)

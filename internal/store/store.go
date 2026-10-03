@@ -67,6 +67,7 @@ func Open(path string) (*Store, error) {
 	for _, col := range []string{
 		`render_key TEXT NOT NULL DEFAULT ''`,   // fingerprint of renderer + output settings
 		`meeting_time TEXT NOT NULL DEFAULT ''`, // RFC 3339, for ordering indexes
+		`source TEXT NOT NULL DEFAULT 'gemini'`,
 	} {
 		if _, err := db.Exec(`ALTER TABLE notes ADD COLUMN ` + col); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
@@ -88,11 +89,30 @@ func (s *Store) NoteState(driveID string) (modified, renderKey string, ok bool, 
 	return modified, renderKey, err == nil, err
 }
 
-func (s *Store) MarkSynced(driveID, modified, title, renderKey string, meeting time.Time) error {
-	_, err := s.db.Exec(`INSERT INTO notes (drive_id, drive_modified, title, synced_at, render_key, meeting_time) VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT (drive_id) DO UPDATE SET drive_modified = excluded.drive_modified, title = excluded.title,
+func (s *Store) MarkSynced(driveID, source, modified, title, renderKey string, meeting time.Time) error {
+	_, err := s.db.Exec(`INSERT INTO notes (drive_id, source, drive_modified, title, synced_at, render_key, meeting_time) VALUES (?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (drive_id) DO UPDATE SET source = excluded.source, drive_modified = excluded.drive_modified, title = excluded.title,
 			synced_at = excluded.synced_at, render_key = excluded.render_key, meeting_time = excluded.meeting_time`,
-		driveID, modified, title, time.Now().UTC().Format(time.RFC3339), renderKey, meeting.Format(time.RFC3339))
+		driveID, source, modified, title, time.Now().UTC().Format(time.RFC3339), renderKey, meeting.Format(time.RFC3339))
+	return err
+}
+
+// FindMeeting returns the Drive file previously synced for the same meeting
+// (same source, title and start), e.g. before a summary was re-uploaded.
+func (s *Store) FindMeeting(source, title string, meeting time.Time) (string, bool, error) {
+	var id string
+	err := s.db.QueryRow(`SELECT drive_id FROM notes WHERE source = ? AND title = ? AND meeting_time = ? ORDER BY synced_at DESC LIMIT 1`,
+		source, title, meeting.Format(time.RFC3339)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return id, err == nil, err
+}
+
+// CopyDocs makes the documents of one Drive file belong to another as well.
+func (s *Store) CopyDocs(fromDriveID, toDriveID string) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO docs (drive_id, role, outline_id, outline_url, written_hash)
+		SELECT ?, role, outline_id, outline_url, written_hash FROM docs WHERE drive_id = ?`, toDriveID, fromDriveID)
 	return err
 }
 

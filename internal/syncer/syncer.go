@@ -1,4 +1,4 @@
-// Package syncer moves Gemini notes from Drive into Outline.
+// Package syncer moves meeting notes (Gemini, Zoom) from Drive into Outline.
 package syncer
 
 import (
@@ -9,17 +9,21 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/sarin/gemini-notes-sync/internal/config"
+	"github.com/sarin/gemini-notes-sync/internal/docx"
 	"github.com/sarin/gemini-notes-sync/internal/gdrive"
 	"github.com/sarin/gemini-notes-sync/internal/gemini"
 	"github.com/sarin/gemini-notes-sync/internal/layout"
+	"github.com/sarin/gemini-notes-sync/internal/note"
 	"github.com/sarin/gemini-notes-sync/internal/outline"
 	"github.com/sarin/gemini-notes-sync/internal/store"
+	"github.com/sarin/gemini-notes-sync/internal/zoom"
 )
 
 const roleMain = "main"
@@ -27,7 +31,8 @@ const roleMain = "main"
 // renderVersion is bumped whenever the generated Markdown changes, so notes
 // synced by an older version are rewritten even if their Google Doc is unchanged.
 // 2: work around Outline checklist import bugs (lost "Details" section).
-const renderVersion = 2
+// 3: "Source" line in the meeting header (Zoom support).
+const renderVersion = 3
 
 type Syncer struct {
 	cfg   *config.Config
@@ -38,6 +43,7 @@ type Syncer struct {
 	loc   *time.Location
 	name  *regexp.Regexp
 	drop  []*regexp.Regexp
+	zdrop []*regexp.Regexp
 	log   *slog.Logger
 
 	collection outline.Collection
@@ -48,9 +54,10 @@ type Syncer struct {
 // renderer version and the output settings. When it changes, every note is
 // rewritten on the next pass even if its Google Doc is unchanged.
 func renderKeyFor(cfg *config.Config) string {
-	sum := sha256.Sum256(fmt.Appendf(nil, "v%d\x00%s\x00%s\x00%s\x00%s\x00%q\x00%q\x00%s",
+	sum := sha256.Sum256(fmt.Appendf(nil, "v%d\x00%s\x00%s\x00%s\x00%s\x00%q\x00%q\x00%s\x00%s\x00%q\x00%q\x00%s",
 		renderVersion, cfg.Layout.Path, cfg.Layout.Title, cfg.Layout.ChildTitle,
-		cfg.Content.Main, cfg.Content.Children, cfg.Content.DropLines, cfg.Sync.Timezone))
+		cfg.Content.Main, cfg.Content.Children, cfg.Content.DropLines, cfg.Sync.Timezone,
+		cfg.Zoom.Main, cfg.Zoom.Children, cfg.Zoom.DropLines, cfg.Zoom.DateOrder))
 	return hex.EncodeToString(sum[:8])
 }
 
@@ -72,38 +79,78 @@ func New(ctx context.Context, cfg *config.Config, drv *gdrive.Client, ol *outlin
 	for _, p := range cfg.Content.DropLines {
 		s.drop = append(s.drop, regexp.MustCompile(p))
 	}
+	for _, p := range cfg.Zoom.DropLines {
+		s.zdrop = append(s.zdrop, regexp.MustCompile(p))
+	}
 	return s, nil
 }
 
-// Notes lists the Gemini notes in scope, oldest first.
-func (s *Syncer) Notes(ctx context.Context) ([]gdrive.File, error) {
+// Item is a note file and the source it came from.
+type Item struct {
+	gdrive.File
+	Source string // note.Gemini or note.Zoom
+}
+
+// Notes lists the notes in scope from every source, oldest first.
+func (s *Syncer) Notes(ctx context.Context) ([]Item, error) {
+	zoomRoots, err := s.drive.ResolveFolders(ctx, s.cfg.Zoom.Folders)
+	if err != nil {
+		return nil, fmt.Errorf("zoom folders: %w", err)
+	}
 	roots, err := s.drive.Roots(ctx, s.cfg.Google.FolderIDs)
 	if err != nil {
 		return nil, err
 	}
-	if len(roots) == 0 {
+	for id := range zoomRoots {
+		delete(roots, id) // the Zoom drop folder is not a Gemini source
+	}
+	if len(roots) == 0 && len(zoomRoots) == 0 {
 		return nil, errors.New("no folders are shared with the service account")
 	}
+
+	var items []Item
 	files, err := s.drive.Notes(ctx, roots, s.name)
 	if err != nil {
 		return nil, err
 	}
+	for _, f := range files {
+		items = append(items, Item{File: f, Source: note.Gemini})
+	}
+	if len(zoomRoots) > 0 {
+		files, err := s.drive.Walk(ctx, zoomRoots, IsZoomFile)
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range files {
+			items = append(items, Item{File: f, Source: note.Zoom})
+		}
+	}
+
 	if lb := s.cfg.Sync.Lookback; lb > 0 {
 		cutoff := time.Now().Add(-lb)
-		files = filter(files, func(f gdrive.File) bool { return f.Created.After(cutoff) })
+		items = filter(items, func(it Item) bool { return it.Created.After(cutoff) })
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Created.Before(files[j].Created) })
-	return files, nil
+	sort.Slice(items, func(i, j int) bool { return items[i].Created.Before(items[j].Created) })
+	return items, nil
+}
+
+// IsZoomFile accepts the formats the Zoom drop folder supports.
+func IsZoomFile(f gdrive.File) bool {
+	switch strings.ToLower(path.Ext(f.Name)) {
+	case ".docx", ".md", ".markdown", ".txt":
+		return true
+	}
+	return f.MimeType == gdrive.DocMime || f.MimeType == gdrive.DocxMime || f.MimeType == "text/markdown" || f.MimeType == "text/plain"
 }
 
 // Run performs one sync pass.
 func (s *Syncer) Run(ctx context.Context) (Result, error) {
 	var res Result
-	files, err := s.Notes(ctx)
+	items, err := s.Notes(ctx)
 	if err != nil {
 		return res, err
 	}
-	res.Notes = len(files)
+	res.Notes = len(items)
 	if s.collection.ID == "" {
 		if s.collection, err = s.ol.FindCollection(ctx, s.cfg.Outline.Collection); err != nil {
 			return res, err
@@ -114,12 +161,12 @@ func (s *Syncer) Run(ctx context.Context) (Result, error) {
 		return res, err
 	}
 	touched := map[string]bool{}
-	for _, f := range files {
+	for _, it := range items {
 		if ctx.Err() != nil {
 			return res, ctx.Err()
 		}
-		log := s.log.With("note", f.Name)
-		outcome, err := s.syncNote(ctx, f, &tree, touched, log)
+		log := s.log.With("note", it.Name, "source", it.Source)
+		outcome, err := s.syncNote(ctx, it, &tree, touched, log)
 		switch {
 		case err != nil:
 			res.Failed++
@@ -152,6 +199,8 @@ const (
 // Plan describes what a sync would write for one note, without touching Outline.
 type Plan struct {
 	File     gdrive.File
+	Source   string
+	HasTime  bool // the meeting time of day is known (not just the date)
 	Meeting  layout.Meeting
 	Path     []string
 	Title    string
@@ -159,28 +208,49 @@ type Plan struct {
 	Children map[string]string // tab key -> document title, in content order
 	Order    []string
 	Images   int
-	Doc      *gemini.Doc
+	Doc      *note.Doc
 }
 
-// Prepare exports and parses a note and renders its layout.
-func (s *Syncer) Prepare(ctx context.Context, f gdrive.File) (*Plan, error) {
-	md, err := s.drive.ExportMarkdown(ctx, f.ID)
-	if err != nil {
-		return nil, fmt.Errorf("export: %w", err)
+// Prepare fetches and parses a note and renders its layout.
+func (s *Syncer) Prepare(ctx context.Context, it Item) (*Plan, error) {
+	f := it.File
+	var (
+		doc            *note.Doc
+		m              layout.Meeting
+		main, children = s.cfg.Content.Main, s.cfg.Content.Children
+		hasTime        bool
+	)
+	switch it.Source {
+	case note.Zoom:
+		md, err := s.zoomMarkdown(ctx, f)
+		if err != nil {
+			return nil, err
+		}
+		opt := zoom.Options{Location: s.loc, DayFirst: s.cfg.Zoom.DateOrder == "dmy", ExtraDrop: s.zdrop}
+		var meta zoom.Meta
+		doc, meta = zoom.Parse(md, f.Name, f.Created, opt)
+		// Without a time of day, a generic title beats "Meeting at 00:00".
+		m = layout.Meeting{Source: "Zoom", Title: meta.Title, Untitled: meta.Untitled && meta.HasTime, Date: meta.Start}
+		hasTime = meta.HasTime
+		main, children = s.cfg.Zoom.Main, s.cfg.Zoom.Children
+	default:
+		md, err := s.drive.ExportMarkdown(ctx, f.ID)
+		if err != nil {
+			return nil, fmt.Errorf("export: %w", err)
+		}
+		doc = gemini.Parse(md, s.drop)
+		title, start, untitled, ok := gemini.ParseName(f.Name, s.loc)
+		if !ok {
+			start = f.Created.In(s.loc)
+		}
+		m = layout.Meeting{Source: "Gemini", Title: title, Untitled: untitled, Date: start, MeetCode: layout.MeetCode(f.Folder)}
+		hasTime = true // from the file name, or the creation time as a fallback
 	}
-	doc := gemini.Parse(md, s.drop)
+	m.RawTitle, m.Attendees, m.EventID, m.SeriesID = f.Name, doc.Attendees, doc.EventID, doc.SeriesID
+	m.DriveID, m.DriveURL, m.Folder = f.ID, f.Link, f.Folder
 
-	title, start, untitled, ok := gemini.ParseName(f.Name, s.loc)
-	if !ok {
-		start = f.Created.In(s.loc)
-	}
-	m := layout.Meeting{
-		Title: title, RawTitle: f.Name, Untitled: untitled, Date: start,
-		Attendees: doc.Attendees, MeetCode: layout.MeetCode(f.Folder),
-		EventID: doc.EventID, SeriesID: doc.SeriesID,
-		DriveID: f.ID, DriveURL: f.Link, Folder: f.Folder,
-	}
-	p := &Plan{File: f, Meeting: m, Doc: doc, Images: len(doc.Images), Children: map[string]string{}}
+	p := &Plan{File: f, Source: it.Source, HasTime: hasTime, Meeting: m, Doc: doc, Images: len(doc.Images), Children: map[string]string{}}
+	var err error
 	if p.Path, err = s.tpl.Path(m); err != nil {
 		return nil, err
 	}
@@ -189,7 +259,7 @@ func (s *Syncer) Prepare(ctx context.Context, f gdrive.File) (*Plan, error) {
 	}
 
 	// The configured main tab, or the first available configured child if it is missing.
-	for _, key := range append([]string{s.cfg.Content.Main}, s.cfg.Content.Children...) {
+	for _, key := range append([]string{main}, children...) {
 		if _, ok := doc.Tab(key); ok {
 			p.Main = key
 			break
@@ -201,7 +271,7 @@ func (s *Syncer) Prepare(ctx context.Context, f gdrive.File) (*Plan, error) {
 		}
 		p.Main = doc.Tabs[0].Key
 	}
-	for _, key := range s.cfg.Content.Children {
+	for _, key := range children {
 		tab, ok := doc.Tab(key)
 		if !ok || key == p.Main || strings.TrimSpace(tab.Body) == "" {
 			continue
@@ -216,17 +286,53 @@ func (s *Syncer) Prepare(ctx context.Context, f gdrive.File) (*Plan, error) {
 	return p, nil
 }
 
-func (s *Syncer) syncNote(ctx context.Context, f gdrive.File, tree *[]*outline.Node, touched map[string]bool, log *slog.Logger) (outcome, error) {
+// zoomMarkdown fetches a file from the Zoom drop folder as Markdown.
+func (s *Syncer) zoomMarkdown(ctx context.Context, f gdrive.File) (string, error) {
+	if f.MimeType == gdrive.DocMime {
+		md, err := s.drive.ExportMarkdown(ctx, f.ID)
+		if err != nil {
+			return "", fmt.Errorf("export: %w", err)
+		}
+		return md, nil
+	}
+	data, err := s.drive.DownloadFile(ctx, f.ID)
+	if err != nil {
+		return "", fmt.Errorf("download: %w", err)
+	}
+	if f.MimeType == gdrive.DocxMime || strings.EqualFold(path.Ext(f.Name), ".docx") {
+		md, err := docx.ToMarkdown(data)
+		if err != nil {
+			return "", fmt.Errorf("convert %s: %w", f.Name, err)
+		}
+		return md, nil
+	}
+	return string(data), nil
+}
+
+func (s *Syncer) syncNote(ctx context.Context, it Item, tree *[]*outline.Node, touched map[string]bool, log *slog.Logger) (outcome, error) {
+	f := it.File
 	modified := f.Modified.UTC().Format(time.RFC3339Nano)
-	if prev, key, ok, err := s.st.NoteState(f.ID); err != nil {
+	prev, key, known, err := s.st.NoteState(f.ID)
+	if err != nil {
 		return 0, err
-	} else if ok && prev == modified && key == s.renderKey {
+	} else if known && prev == modified && key == s.renderKey {
 		return unchanged, nil
 	}
 
-	p, err := s.Prepare(ctx, f)
+	p, err := s.Prepare(ctx, it)
 	if err != nil {
 		return 0, err
+	}
+	if !known && it.Source == note.Zoom {
+		// A summary uploaded again as a new file updates the meeting's existing documents.
+		if earlier, ok, err := s.st.FindMeeting(it.Source, p.Title, p.Meeting.Date); err != nil {
+			return 0, err
+		} else if ok && earlier != f.ID {
+			if err := s.st.CopyDocs(earlier, f.ID); err != nil {
+				return 0, err
+			}
+			log.Info("re-uploaded summary; updating the existing documents")
+		}
 	}
 	parentID, chain, err := s.ensurePath(ctx, tree, p.Path)
 	if err != nil {
@@ -303,7 +409,7 @@ func (s *Syncer) syncNote(ctx context.Context, f gdrive.File, tree *[]*outline.N
 			return 0, err
 		}
 	}
-	if err := s.st.MarkSynced(f.ID, modified, p.Title, s.renderKey, p.Meeting.Date); err != nil {
+	if err := s.st.MarkSynced(f.ID, it.Source, modified, p.Title, s.renderKey, p.Meeting.Date); err != nil {
 		return 0, err
 	}
 	log.Info("synced", "title", p.Title, "url", s.cfg.Outline.BaseURL+refs[roleMain].URL)
@@ -371,10 +477,14 @@ func (s *Syncer) uploadImages(ctx context.Context, p *Plan, docID string, skip m
 		return urls, nil
 	}
 
-	uris, err := s.drive.ImageURIs(ctx, p.File.ID)
+	var uris []string
+	var err error
+	if p.File.MimeType == gdrive.DocMime {
+		uris, err = s.drive.ImageURIs(ctx, p.File.ID)
+	}
 	if err != nil {
 		log.Warn("could not read full-resolution images; using export copies", "err", err)
-	} else if len(uris) != len(p.Doc.Images) {
+	} else if uris != nil && len(uris) != len(p.Doc.Images) {
 		log.Warn("image count mismatch between Docs API and export; using export copies", "docs", len(uris), "export", len(p.Doc.Images))
 		uris = nil
 	}

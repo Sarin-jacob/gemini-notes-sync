@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2/google"
@@ -18,7 +19,8 @@ import (
 
 const (
 	folderMime = "application/vnd.google-apps.folder"
-	docMime    = "application/vnd.google-apps.document"
+	DocMime    = "application/vnd.google-apps.document"
+	DocxMime   = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 )
 
 type Client struct {
@@ -27,10 +29,11 @@ type Client struct {
 	http  *http.Client
 }
 
-// File is a Gemini notes document found in Drive.
+// File is a note file found in Drive.
 type File struct {
 	ID       string
 	Name     string
+	MimeType string
 	Folder   string // folder path below the shared root, e.g. "Google Meet/abc-defg-hij - 2026/09/27"
 	Created  time.Time
 	Modified time.Time
@@ -91,9 +94,43 @@ func (c *Client) Roots(ctx context.Context, configured []string) (map[string]str
 	return roots, err
 }
 
+// ResolveFolders maps folder names or IDs to the folders shared with the account.
+// Names are matched case-insensitively against shared folders; anything else is
+// tried as a folder ID.
+func (c *Client) ResolveFolders(ctx context.Context, namesOrIDs []string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(namesOrIDs) == 0 {
+		return out, nil
+	}
+	shared, err := c.Roots(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+next:
+	for _, want := range namesOrIDs {
+		for id, name := range shared {
+			if id == want || strings.EqualFold(name, want) {
+				out[id] = name
+				continue next
+			}
+		}
+		f, err := c.drive.Files.Get(want).Fields("id, name, mimeType").Context(ctx).Do()
+		if err != nil || f.MimeType != folderMime {
+			return nil, fmt.Errorf("folder %q is not shared with the service account", want)
+		}
+		out[f.Id] = f.Name
+	}
+	return out, nil
+}
+
 // Notes walks the roots recursively and returns Google Docs whose name matches.
-// A folder shared on its own and also nested in another root is visited once.
 func (c *Client) Notes(ctx context.Context, roots map[string]string, name *regexp.Regexp) ([]File, error) {
+	return c.Walk(ctx, roots, func(f File) bool { return f.MimeType == DocMime && name.MatchString(f.Name) })
+}
+
+// Walk lists the files under roots recursively, keeping those accept approves.
+// A folder shared on its own and also nested in another root is visited once.
+func (c *Client) Walk(ctx context.Context, roots map[string]string, accept func(File) bool) ([]File, error) {
 	type dir struct{ id, path string }
 	var queue []dir
 	for id, n := range roots {
@@ -114,13 +151,15 @@ func (c *Client) Notes(ctx context.Context, roots map[string]string, name *regex
 			PageSize(200).Context(ctx).
 			Pages(ctx, func(p *drive.FileList) error {
 				for _, f := range p.Files {
-					switch {
-					case f.MimeType == folderMime:
+					if f.MimeType == folderMime {
 						queue = append(queue, dir{f.Id, d.path + "/" + f.Name})
-					case f.MimeType == docMime && name.MatchString(f.Name):
-						created, _ := time.Parse(time.RFC3339, f.CreatedTime)
-						modified, _ := time.Parse(time.RFC3339, f.ModifiedTime)
-						out = append(out, File{ID: f.Id, Name: f.Name, Folder: d.path, Created: created, Modified: modified, Link: f.WebViewLink})
+						continue
+					}
+					created, _ := time.Parse(time.RFC3339, f.CreatedTime)
+					modified, _ := time.Parse(time.RFC3339, f.ModifiedTime)
+					file := File{ID: f.Id, Name: f.Name, MimeType: f.MimeType, Folder: d.path, Created: created, Modified: modified, Link: f.WebViewLink}
+					if accept(file) {
+						out = append(out, file)
 					}
 				}
 				return nil
@@ -214,4 +253,14 @@ func (c *Client) Download(ctx context.Context, uri string) ([]byte, string, erro
 	}
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
 	return b, resp.Header.Get("Content-Type"), err
+}
+
+// DownloadFile returns the content of an uploaded (non-Google) file.
+func (c *Client) DownloadFile(ctx context.Context, id string) ([]byte, error) {
+	resp, err := c.drive.Files.Get(id).Context(ctx).Download()
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(io.LimitReader(resp.Body, 50<<20))
 }

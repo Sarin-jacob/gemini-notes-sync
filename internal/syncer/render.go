@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sarin/gemini-notes-sync/internal/gdrive"
 	"github.com/sarin/gemini-notes-sync/internal/gemini"
+	"github.com/sarin/gemini-notes-sync/internal/note"
 	"github.com/sarin/gemini-notes-sync/internal/outline"
 	"github.com/sarin/gemini-notes-sync/internal/store"
 )
@@ -45,7 +47,11 @@ func (s *Syncer) render(p *Plan, role string, refs map[string]store.DocRef, imag
 	var header []string
 	if role == roleMain {
 		m := p.Meeting
-		header = append(header, "**When:** "+m.Date.Format("Mon, 2 Jan 2006 · 15:04 MST"))
+		when := m.Date.Format("Mon, 2 Jan 2006")
+		if p.HasTime {
+			when += m.Date.Format(" · 15:04 MST")
+		}
+		header = append(header, "**When:** "+when, "**Source:** "+sourceLabel(p.Source))
 		if len(m.Attendees) > 0 {
 			header = append(header, "**Attendees:** "+strings.Join(m.Attendees, ", "))
 		}
@@ -56,13 +62,13 @@ func (s *Syncer) render(p *Plan, role string, refs map[string]store.DocRef, imag
 				links = append(links, fmt.Sprintf("[%s](%s)", t.Name, ref.URL))
 			}
 		}
-		links = append(links, fmt.Sprintf("[Google Doc](%s)", p.File.Link))
+		links = append(links, fmt.Sprintf("[%s](%s)", originalLabel(p), p.File.Link))
 		if p.Doc.CalendarURL != "" {
 			links = append(links, fmt.Sprintf("[Calendar event](%s)", p.Doc.CalendarURL))
 		}
 		header = append(header, "**Links:** "+strings.Join(links, " · "))
 	} else {
-		header = append(header, fmt.Sprintf("**Meeting:** [%s](%s) · [Google Doc](%s)", p.Title, refs[roleMain].URL, p.File.Link))
+		header = append(header, fmt.Sprintf("**Meeting:** [%s](%s) · [%s](%s)", p.Title, refs[roleMain].URL, originalLabel(p), p.File.Link))
 	}
 	// Separate lines with hard breaks so the header renders as one compact block.
 	return strings.Join(header, "  \n") + "\n\n---\n\n" + outlineSafe(body) + "\n"
@@ -220,4 +226,19 @@ func replaceSection(text, heading, section string) string {
 
 func escapeLinkText(s string) string {
 	return strings.NewReplacer("[", `\[`, "]", `\]`).Replace(s)
+}
+
+func sourceLabel(source string) string {
+	if source == note.Zoom {
+		return "Zoom"
+	}
+	return "Google Meet (Gemini)"
+}
+
+// originalLabel names the link back to the source file in Drive.
+func originalLabel(p *Plan) string {
+	if p.File.MimeType == gdrive.DocMime {
+		return "Google Doc"
+	}
+	return "Original file"
 }

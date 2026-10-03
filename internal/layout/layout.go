@@ -13,7 +13,8 @@ import (
 
 // Meeting is the data available to all templates.
 type Meeting struct {
-	Title     string    // meeting title from the file name ("Meeting started" for ad-hoc calls)
+	Source    string    // "Gemini" or "Zoom"
+	Title     string    // meeting title ("Meeting started" for ad-hoc Meet calls)
 	RawTitle  string    // Drive file name
 	Untitled  bool      // ad-hoc meeting without a calendar title
 	Date      time.Time // meeting start

@@ -24,7 +24,7 @@ sync:
   health_addr: ":8080"    # GET /healthz in "run" mode; empty disables
 
 layout:
-  # Go templates. Fields: .Title .RawTitle .Untitled .Date .Attendees .MeetCode
+  # Go templates. Fields: .Source ("Gemini" or "Zoom") .Title .RawTitle .Untitled .Date .Attendees .MeetCode
   #   .EventID .SeriesID .DriveID .DriveURL .Folder
   # Functions: date, lower, upper, trim, trunc, default, replace, regexReplace, join
   # "/" in path separates nested container documents; each gets an auto index.
@@ -39,3 +39,15 @@ content:
   # Extra regexes; matching lines are removed (Gemini's surveys and
   # disclaimers are removed by default).
   drop_lines: []
+
+zoom:
+  # Drop folder for Zoom AI Companion summaries: export a summary from Zoom
+  # (Docs → … → Export → Word) and upload it here. Name or ID of a Drive folder
+  # shared with the service account as Viewer. Empty disables Zoom.
+  # Accepted: .docx, .md, .txt and Google Docs. Files are left in place;
+  # re-uploading a summary updates the meeting's existing documents.
+  folders: []             # e.g. ["Zoom Notes"]
+  main: summary           # section that becomes the meeting document
+  children: [transcript]  # sections nested under it, if present
+  date_order: mdy         # read 03/04/2026 as March 4 (mdy, Zoom's US default) or 3 April (dmy)
+  drop_lines: []          # extra regexes; Zoom's AI disclaimer is removed by default

@@ -21,6 +21,16 @@ type Config struct {
 	Sync    Sync    `yaml:"sync"`
 	Layout  Layout  `yaml:"layout"`
 	Content Content `yaml:"content"`
+	Zoom    Zoom    `yaml:"zoom"`
+}
+
+// Zoom configures the drop folder for exported Zoom meeting summaries.
+type Zoom struct {
+	Folders   []string `yaml:"folders"`    // names or IDs of folders shared with the service account; empty disables
+	Main      string   `yaml:"main"`       // section used as the meeting document
+	Children  []string `yaml:"children"`   // sections written as nested documents
+	DateOrder string   `yaml:"date_order"` // how to read 03/04/2026: mdy (Zoom's US default) or dmy
+	DropLines []string `yaml:"drop_lines"` // extra regexes; matching lines are removed
 }
 
 type Google struct {
@@ -77,6 +87,7 @@ func defaults() Config {
 		},
 		Layout:  Layout{Path: DefaultPath, Title: DefaultTitle, ChildTitle: DefaultChildTitle},
 		Content: Content{Main: "quick_notes", Children: []string{"full_notes", "transcript"}},
+		Zoom:    Zoom{Main: "summary", Children: []string{"transcript"}, DateOrder: "mdy"},
 	}
 }
 
@@ -132,10 +143,13 @@ func (c *Config) validate() error {
 	if _, err := regexp.Compile(c.Google.NotesNamePattern); err != nil {
 		errs = append(errs, fmt.Errorf("google.notes_name_pattern: %w", err))
 	}
-	for _, p := range c.Content.DropLines {
+	for _, p := range append(append([]string{}, c.Content.DropLines...), c.Zoom.DropLines...) {
 		if _, err := regexp.Compile(p); err != nil {
 			errs = append(errs, fmt.Errorf("content.drop_lines %q: %w", p, err))
 		}
+	}
+	if c.Zoom.DateOrder != "mdy" && c.Zoom.DateOrder != "dmy" {
+		errs = append(errs, fmt.Errorf("zoom.date_order must be mdy or dmy, got %q", c.Zoom.DateOrder))
 	}
 	if c.Sync.ConflictPolicy != "skip" && c.Sync.ConflictPolicy != "overwrite" {
 		errs = append(errs, fmt.Errorf("sync.conflict_policy must be skip or overwrite, got %q", c.Sync.ConflictPolicy))
