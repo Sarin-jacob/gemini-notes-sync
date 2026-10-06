@@ -73,7 +73,20 @@ Or without Docker:
 go run ./cmd/gemini-notes-sync once
 ```
 
-### 5. Zoom summaries (optional)
+### 5. Keep working when Google creates a new folder (recommended)
+
+Google sometimes files new notes into a *new* top-level "Google Meet" folder
+instead of the one you shared, and the service account can't see it until you
+share it too. The sync therefore also picks up any "Notes by Gemini" document
+that is shared with the service account directly, wherever it lives.
+
+To automate that, paste [docs/apps-script/share-notes.gs](docs/apps-script/share-notes.gs)
+into a [Google Apps Script](https://script.google.com) project in your account
+(setup steps are at the top of the file). Every 10 minutes it shares each new
+note, and only the note, with the service account as Viewer. After that you no
+longer need to share folders at all.
+
+### 6. Zoom summaries (optional)
 
 Zoom keeps AI Companion summaries in Zoom (and deletes them after 90 days by
 default); it does not save them to Drive. To sync them:

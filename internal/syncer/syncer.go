@@ -95,7 +95,9 @@ type Item struct {
 func (s *Syncer) Notes(ctx context.Context) ([]Item, error) {
 	zoomRoots, err := s.drive.ResolveFolders(ctx, s.cfg.Zoom.Folders)
 	if err != nil {
-		return nil, fmt.Errorf("zoom folders: %w", err)
+		// A Zoom folder that is missing or not shared yet must not stop Gemini notes.
+		s.log.Warn("skipping Zoom: " + err.Error())
+		zoomRoots = nil
 	}
 	roots, err := s.drive.Roots(ctx, s.cfg.Google.FolderIDs)
 	if err != nil {
@@ -103,9 +105,6 @@ func (s *Syncer) Notes(ctx context.Context) ([]Item, error) {
 	}
 	for id := range zoomRoots {
 		delete(roots, id) // the Zoom drop folder is not a Gemini source
-	}
-	if len(roots) == 0 && len(zoomRoots) == 0 {
-		return nil, errors.New("no folders are shared with the service account")
 	}
 
 	var items []Item

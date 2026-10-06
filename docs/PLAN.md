@@ -144,6 +144,8 @@ All checks passed (`cmd/outlinespike`):
 
 | Zoom (2026-10-04) | Zoom does not save AI Companion summaries to Drive (they live in Zoom, are e-mailed to the host, and expire after 90 days by default; export is Word or PDF; the summaries API needs an admin S2S app and is unreliable). So: a **Drive drop folder** shared with the SA (`zoom.folders`), accepting .docx (own converter, `internal/docx`), .md/.txt and Google Docs. Same Year/Month tree, header says "Source: Zoom". Files stay in place; a re-upload (new Drive ID, same title + start) reuses the meeting's documents. Parser (`internal/zoom`) is heuristic until a real export is available. |
 
+| Folder forks (2026-10-06) | Google created a second top-level `Google Meet` folder (2026-10-04) instead of reusing the shared one, so new notes landed where the SA had no access. Discovery now also includes docs shared **directly** (`sharedWithMe` docs matching the name pattern). An optional Apps Script (`docs/apps-script/share-notes.gs`) runs in the user's account and shares each note doc with the SA, so no folder needs sharing. Cause of the fork not confirmed. |
+
 Resulting tree per meeting:
 
 ```

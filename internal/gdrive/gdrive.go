@@ -123,9 +123,35 @@ next:
 	return out, nil
 }
 
-// Notes walks the roots recursively and returns Google Docs whose name matches.
+// Notes returns the Google Docs whose name matches, from two places: the shared
+// folders (walked recursively) and documents shared with the account directly,
+// wherever they live. The second catches notes Google files into a new folder
+// that nobody has shared yet. Each document is returned once.
 func (c *Client) Notes(ctx context.Context, roots map[string]string, name *regexp.Regexp) ([]File, error) {
-	return c.Walk(ctx, roots, func(f File) bool { return f.MimeType == DocMime && name.MatchString(f.Name) })
+	files, err := c.Walk(ctx, roots, func(f File) bool { return f.MimeType == DocMime && name.MatchString(f.Name) })
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, f := range files {
+		seen[f.ID] = true
+	}
+	err = c.drive.Files.List().
+		Q("mimeType = '"+DocMime+"' and sharedWithMe = true and trashed = false").
+		Fields("nextPageToken, files(id, name, mimeType, createdTime, modifiedTime, webViewLink)").
+		PageSize(200).Context(ctx).
+		Pages(ctx, func(p *drive.FileList) error {
+			for _, f := range p.Files {
+				if seen[f.Id] || !name.MatchString(f.Name) {
+					continue
+				}
+				created, _ := time.Parse(time.RFC3339, f.CreatedTime)
+				modified, _ := time.Parse(time.RFC3339, f.ModifiedTime)
+				files = append(files, File{ID: f.Id, Name: f.Name, MimeType: f.MimeType, Folder: "(shared directly)", Created: created, Modified: modified, Link: f.WebViewLink})
+			}
+			return nil
+		})
+	return files, err
 }
 
 // Walk lists the files under roots recursively, keeping those accept approves.
