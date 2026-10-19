@@ -29,6 +29,17 @@ func TestParseName(t *testing.T) {
 	}
 }
 
+func TestImageDefinitionWithTitle(t *testing.T) {
+	md := "# **Notes**\n\nText ![alt][image1]\n\n[image1]: <data:image/png;base64,iVBORw0KGgo=> \"best friend\"\n"
+	d := Parse(md, nil)
+	if _, ok := d.Images["image1"]; !ok {
+		t.Fatal("image with a title was not captured")
+	}
+	if tab, _ := d.Tab("notes"); strings.Contains(tab.Body, "base64") {
+		t.Errorf("image data left in body: %q", tab.Body)
+	}
+}
+
 func TestParse(t *testing.T) {
 	raw, err := os.ReadFile("testdata/note.md")
 	if err != nil {

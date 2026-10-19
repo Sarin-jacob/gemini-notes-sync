@@ -39,7 +39,7 @@ var DefaultDropLines = []string{
 
 var (
 	nameRe     = regexp.MustCompile(`^(.*?)\s*-?\s*(\d{4}/\d{2}/\d{2} \d{2}:\d{2})(?:\s+([A-Z][A-Za-z+\-0-9]{1,6}))?\s*-\s*Notes by Gemini\s*$`)
-	imageDefRe = regexp.MustCompile(`(?m)^\[(image\d+)\]:\s*<data:(image/[a-z+]+);base64,([A-Za-z0-9+/=]+)>\s*$`)
+	imageDefRe = regexp.MustCompile(`(?m)^\[(image\d+)\]:\s*<data:(image/[a-z+]+);base64,([A-Za-z0-9+/=]+)>(?:\s+"[^"]*")?\s*$`)
 	headingRe  = regexp.MustCompile(`^(#{1,6})(?:\s+(.*?))?\s*$`)
 	anchorRe   = regexp.MustCompile(`\s*\{#[^}]*\}\s*$`)
 	boldWrapRe = regexp.MustCompile(`^\*\*(.*?)\*\*$`)

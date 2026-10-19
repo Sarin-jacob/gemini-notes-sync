@@ -46,7 +46,7 @@ type Options struct {
 }
 
 var (
-	imageDefRe     = regexp.MustCompile(`(?m)^\[(image\d+)\]:\s*<data:(image/[a-z+]+);base64,([A-Za-z0-9+/=]+)>\s*$`)
+	imageDefRe     = regexp.MustCompile(`(?m)^\[(image\d+)\]:\s*<data:(image/[a-z+]+);base64,([A-Za-z0-9+/=]+)>(?:\s+"[^"]*")?\s*$`)
 	summaryForRe   = regexp.MustCompile(`(?i)^(?:#{1,6}\s*)?[*_]*\s*(?:ai companion\s+)?meeting summary(?:\s+for|\s*:)\s*(.+?)\s*[*_]*\s*$`)
 	h1Re           = regexp.MustCompile(`^#\s+(.+?)\s*$`)
 	headingLevelRe = regexp.MustCompile(`^(#{1,6})\s`)

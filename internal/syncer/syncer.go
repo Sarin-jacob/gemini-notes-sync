@@ -32,7 +32,9 @@ const roleMain = "main"
 // synced by an older version are rewritten even if their Google Doc is unchanged.
 // 2: work around Outline checklist import bugs (lost "Details" section).
 // 3: "Source" line in the meeting header (Zoom support).
-const renderVersion = 3
+// 4: notes follow layout changes (documents are moved).
+// 5: image definitions with titles; documents without the standard tabs stay whole.
+const renderVersion = 5
 
 type Syncer struct {
 	cfg   *config.Config
@@ -238,6 +240,7 @@ func (s *Syncer) Prepare(ctx context.Context, it Item) (*Plan, error) {
 			return nil, fmt.Errorf("export: %w", err)
 		}
 		doc = gemini.Parse(md, s.drop)
+		doc.Tabs = mergeUnknownTabs(doc.Tabs, main, children)
 		title, start, untitled, ok := gemini.ParseName(f.Name, s.loc)
 		if !ok {
 			start = f.Created.In(s.loc)
@@ -283,6 +286,32 @@ func (s *Syncer) Prepare(ctx context.Context, it Item) (*Plan, error) {
 		p.Order = append(p.Order, key)
 	}
 	return p, nil
+}
+
+// mergeUnknownTabs keeps documents that lack the standard tabs whole. Without
+// them, older single-tab notes or ordinary documents would keep only their
+// first section. The merged tab takes the main tab's key.
+func mergeUnknownTabs(tabs []note.Tab, main string, children []string) []note.Tab {
+	known := map[string]bool{main: true}
+	for _, k := range children {
+		known[k] = true
+	}
+	for _, t := range tabs {
+		if known[t.Key] {
+			return tabs
+		}
+	}
+	if len(tabs) <= 1 {
+		if len(tabs) == 1 {
+			tabs[0].Key = main
+		}
+		return tabs
+	}
+	var parts []string
+	for _, t := range tabs {
+		parts = append(parts, "## "+t.Name+"\n\n"+t.Body)
+	}
+	return []note.Tab{{Key: main, Name: "Notes", Body: strings.Join(parts, "\n\n")}}
 }
 
 // zoomMarkdown fetches a file from the Zoom drop folder as Markdown.
@@ -354,19 +383,29 @@ func (s *Syncer) syncNote(ctx context.Context, it Item, tree *[]*outline.Node, t
 	// Pass 1: make sure every document exists (so all URLs are known for linking)
 	// and find documents edited in Outline since we last wrote them.
 	skip := map[string]bool{}
+	placed, err := s.st.Parent(f.ID)
+	if err != nil {
+		return 0, err
+	}
 	for _, role := range roles {
 		ref, ok := refs[role]
 		if ok {
 			cur, err := s.ol.Info(ctx, ref.OutlineID)
-			switch {
-			case errors.Is(err, outline.ErrNotFound):
+			if errors.Is(err, outline.ErrNotFound) {
 				log.Warn("document was deleted in Outline; recreating", "role", role)
 				ok = false
-			case err != nil:
+			} else if err != nil {
 				return 0, err
-			case s.cfg.Sync.ConflictPolicy == "skip" && hashDoc(cur) != ref.WrittenHash:
-				log.Warn("document was edited in Outline; leaving it alone", "role", role, "url", s.cfg.Outline.BaseURL+ref.URL)
-				skip[role] = true
+			} else {
+				if role == roleMain {
+					if placed, err = s.followLayout(ctx, ref, cur, parentID, placed, p.Path, touched, log); err != nil {
+						return 0, err
+					}
+				}
+				if s.cfg.Sync.ConflictPolicy == "skip" && hashDoc(cur) != ref.WrittenHash {
+					log.Warn("document was edited in Outline; leaving it alone", "role", role, "url", s.cfg.Outline.BaseURL+ref.URL)
+					skip[role] = true
+				}
 			}
 		}
 		if !ok {
@@ -382,9 +421,16 @@ func (s *Syncer) syncNote(ctx context.Context, it Item, tree *[]*outline.Node, t
 			if err := s.st.PutDoc(f.ID, role, ref); err != nil {
 				return 0, err
 			}
+			if role == roleMain {
+				placed = parentID
+			}
 			log.Info("created document", "role", role, "url", s.cfg.Outline.BaseURL+d.URL)
 		}
 		refs[role] = ref
+	}
+
+	if err := s.st.SetParent(f.ID, placed); err != nil {
+		return 0, err
 	}
 
 	images, err := s.uploadImages(ctx, p, refs[roleMain].OutlineID, skip, log)
@@ -416,6 +462,28 @@ func (s *Syncer) syncNote(ctx context.Context, it Item, tree *[]*outline.Node, t
 		return conflict, nil
 	}
 	return written, nil
+}
+
+// followLayout moves a note's meeting document (with its children) when the
+// layout now puts it under a different container. A document the user moved by
+// hand, i.e. one no longer where this tool last placed it, stays where it is.
+// It returns the container the tool considers the document placed under.
+func (s *Syncer) followLayout(ctx context.Context, ref store.DocRef, cur outline.Document, want, placed string, path []string, touched map[string]bool, log *slog.Logger) (string, error) {
+	if cur.ParentDocumentID == want {
+		return want, nil
+	}
+	if placed != "" && placed != cur.ParentDocumentID {
+		log.Info("document was moved in Outline; leaving it where it is")
+		return placed, nil
+	}
+	if err := s.ol.Move(ctx, ref.OutlineID, s.collection.ID, want); err != nil {
+		return placed, fmt.Errorf("move: %w", err)
+	}
+	if cur.ParentDocumentID != "" {
+		touched[cur.ParentDocumentID] = true // its index loses this entry
+	}
+	log.Info("moved document to follow the layout", "path", strings.Join(path, " / "))
+	return want, nil
 }
 
 // ensurePath finds or creates the container documents for path and returns the
@@ -511,7 +579,9 @@ func (s *Syncer) uploadImages(ctx context.Context, p *Plan, docID string, skip m
 			ctype = http.DetectContentType(data)
 		}
 		sum := sha256.Sum256(data)
-		sha := hex.EncodeToString(sum[:])
+		// Keyed per document: an image reused across documents would vanish with
+		// the document it was first uploaded for.
+		sha := hex.EncodeToString(sum[:]) + ":" + docID
 		url, err := s.st.Attachment(sha)
 		if err != nil {
 			return nil, err

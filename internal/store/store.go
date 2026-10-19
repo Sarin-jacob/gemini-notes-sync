@@ -68,6 +68,7 @@ func Open(path string) (*Store, error) {
 		`render_key TEXT NOT NULL DEFAULT ''`,   // fingerprint of renderer + output settings
 		`meeting_time TEXT NOT NULL DEFAULT ''`, // RFC 3339, for ordering indexes
 		`source TEXT NOT NULL DEFAULT 'gemini'`,
+		`parent_id TEXT NOT NULL DEFAULT ''`, // container the meeting document was last placed under
 	} {
 		if _, err := db.Exec(`ALTER TABLE notes ADD COLUMN ` + col); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
@@ -94,6 +95,27 @@ func (s *Store) MarkSynced(driveID, source, modified, title, renderKey string, m
 		ON CONFLICT (drive_id) DO UPDATE SET source = excluded.source, drive_modified = excluded.drive_modified, title = excluded.title,
 			synced_at = excluded.synced_at, render_key = excluded.render_key, meeting_time = excluded.meeting_time`,
 		driveID, source, modified, title, time.Now().UTC().Format(time.RFC3339), renderKey, meeting.Format(time.RFC3339))
+	return err
+}
+
+// Parent returns the container a note's meeting document was last placed under
+// by this tool ("" when unknown or at the collection root).
+func (s *Store) Parent(driveID string) (string, error) {
+	var p string
+	err := s.db.QueryRow(`SELECT parent_id FROM notes WHERE drive_id = ?`, driveID).Scan(&p)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return p, err
+}
+
+// SetParent records where the tool placed a note's meeting document. The note
+// row must exist; a first-time note gets it from MarkSynced's upsert, so this
+// creates a minimal row when needed.
+func (s *Store) SetParent(driveID, parentID string) error {
+	_, err := s.db.Exec(`INSERT INTO notes (drive_id, drive_modified, title, synced_at, parent_id) VALUES (?, '', '', ?, ?)
+		ON CONFLICT (drive_id) DO UPDATE SET parent_id = excluded.parent_id`,
+		driveID, time.Now().UTC().Format(time.RFC3339), parentID)
 	return err
 }
 

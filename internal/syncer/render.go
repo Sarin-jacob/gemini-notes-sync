@@ -119,14 +119,23 @@ func (s *Syncer) rebuildIndexes(ctx context.Context, ids map[string]bool) error 
 		return err
 	}
 	nodes := map[string]*outline.Node{}
-	var walk func([]*outline.Node)
-	walk = func(ns []*outline.Node) {
+	parents := map[string]string{}
+	var walk func([]*outline.Node, string)
+	walk = func(ns []*outline.Node, parent string) {
 		for _, n := range ns {
 			nodes[n.ID] = n
-			walk(n.Children)
+			parents[n.ID] = parent
+			walk(n.Children, n.ID)
 		}
 	}
-	walk(tree)
+	walk(tree, "")
+	// A container's index lists its children, so every ancestor of a changed one
+	// (a year listing its months) may need refreshing too.
+	for id := range ids {
+		for p := parents[id]; p != ""; p = parents[p] {
+			ids[p] = true
+		}
+	}
 	times, err := s.st.MeetingTimes()
 	if err != nil {
 		return err

@@ -36,6 +36,9 @@ type Document struct {
 	Title            string `json:"title"`
 	Text             string `json:"text"`
 	ParentDocumentID string `json:"parentDocumentId"`
+	DeletedAt        string `json:"deletedAt"` // set while the document is in the trash
+	CreatedAt        string `json:"createdAt"`
+	UpdatedAt        string `json:"updatedAt"`
 	CollectionID     string `json:"collectionId"`
 }
 
@@ -156,9 +159,14 @@ func (c *Client) Tree(ctx context.Context, collectionID string) ([]*Node, error)
 	return nodes, err
 }
 
+// Info fetches a document. Outline still answers for documents in the trash;
+// those are reported as ErrNotFound, since they can no longer be edited.
 func (c *Client) Info(ctx context.Context, id string) (Document, error) {
 	var d Document
 	err := c.call(ctx, "documents.info", map[string]any{"id": id}, &d)
+	if err == nil && d.DeletedAt != "" {
+		return Document{}, fmt.Errorf("documents.info: %w (in trash)", ErrNotFound)
+	}
 	return d, err
 }
 
@@ -244,6 +252,16 @@ func Truncate(s string) string {
 	}
 	r := []rune(s)
 	return strings.TrimSpace(string(r[:MaxTitle-1])) + "…"
+}
+
+// Move re-parents a document (with its children). An empty parentID moves it to
+// the collection root. The document's URL does not change.
+func (c *Client) Move(ctx context.Context, id, collectionID, parentID string) error {
+	body := map[string]any{"id": id, "collectionId": collectionID}
+	if parentID != "" {
+		body["parentDocumentId"] = parentID
+	}
+	return c.call(ctx, "documents.move", body, nil)
 }
 
 // Delete moves a document (and its children) to Outline's trash.
